@@ -1,0 +1,76 @@
+#!/bin/bash
+# Shell script for DPA
+# Author: <nicrevelee@gmail.com>
+# Last Update: 2014-04-21
+
+trap "get_rescol" WINCH
+
+function get_col
+{
+	TERM_COLS=`tput cols`
+}
+
+function get_rescol
+{
+	get_col
+	if [ $TERM_COLS -lt 68 ];then
+		RES_COL=$[$TERM_COLS - 9]
+	else 
+		RES_COL=59
+	fi
+}
+
+function echoOK
+{
+	#echo -e "\033[60G[\033[1;32m  OK  \033[0;39m]"
+	echo -e "\033[${TERM_COLS}D\033[${RES_COL}C[\033[1;32m  OK  \033[0;39m]"
+}
+
+function echoFail
+{
+	echo -e "\033[${TERM_COLS}D\033[${RES_COL}C[\033[1;31mFAILED\033[0;39m]"
+}
+
+#权限检查
+function userCheck
+{
+	if test "$(whoami)" != "root"; then
+		echo "Error: You need to run this script as root.";
+		exit 1
+	fi
+}
+
+function kernelCheck
+{
+	MINVERMAJ=2
+	MINVERMIN=6
+	MINVERBUILD=32
+	
+	MAXVERMAJ=2
+	MAXVERMIN=6
+	MAXVERBUILD=36
+	
+	vermaj=`uname -r | awk -F. '{ printf("%d\n",$1); }'`
+	vermin=`uname -r | awk -F. '{ printf("%d\n",$2); }'`
+	verbuild=`uname -r | awk -F. '{ printf("%d\n",$3); }'`
+	
+	if [ $vermaj -ge $MINVERMAJ ] && [ $vermaj -le $MAXVERMAJ ] ; then
+		if [ $vermin -ge $MINVERMIN ] && [ $vermin -le $MAXVERMIN ] ; then
+			if [ $verbuild -ge $MINVERBUILD ] && [ $verbuild -le $MAXVERBUILD ] ; then
+				return 0
+			fi
+		fi
+	fi
+	
+	if [ $MINVERMAJ -eq $MAXVERMAJ ] && [ $MINVERMIN -eq $MAXVERMIN ] && [ $MINVERBUILD -eq $MAXVERBUILD ] ; then
+		verrange="${MINVERMAJ}.${MINVERMIN}.${MINVERBUILD} is"
+	else
+		verrange="${MINVERMAJ}.${MINVERMIN}.${MINVERBUILD} to ${MAXVERMAJ}.${MAXVERMIN}.${MAXVERBUILD} are"
+	fi
+	
+	echo "Error: Invalid kernel version: ${vermaj}.${vermin}.${verbuild}, only $verrange supported."
+	exit 1
+}
+
+get_rescol
+

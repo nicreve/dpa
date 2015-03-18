@@ -1,0 +1,160 @@
+#!/bin/bash
+# Shell script for DPA
+# Author: <nicrevelee@gmail.com>
+# Last Update: 2014-04-21
+
+declare -a driver_array
+declare -a driver_dir_array
+declare -a inuse_driver_map_array
+declare -a relevant_intf_array
+declare -a relevant_driver_array
+
+#驱动模块对应目录
+DRIVER_MAP_ARRAY=("igb:igb-3.0.6" "ixgbe:ixgbe-3.4.8" "bnx2:bnx2-2.1.11")
+
+function getDrvFromNetrules
+{
+	#在udev生成的net rules文件中查找接口对应的驱动（在注释行）
+	#只有命名为eth[0-9]格式的接口才可能有对应规则，如果使用一致性网络设备命名法命名接口（如em1,p2p1等），则无规则
+	netrulesfile="/etc/udev/rules.d/70-persistent-net.rules"
+	
+	if [ ! -f $netrulesfile ]; then
+		return 1
+	fi
+
+	commentline=$(awk 'BEGIN{FS="\n";RS="" } /NAME="'"$1"'"$/{print $1;exit}' $netrulesfile)
+	
+	driver=$(awk -F '[()]' '/^# PCI device /{print $2}' <<< $commentline)
+	if [ -z $driver ]; then
+		return 1
+	fi
+	return 0
+}
+
+function getDrvFromPciInfo
+{
+	local ifcfgfile="/etc/sysconfig/network-scripts/ifcfg-$1"
+	local -a mac_array
+	
+	if [ ! -f $ifcfgfile ]; then
+		return 1
+	fi
+	
+	. $ifcfgfile
+	
+	if [ -z $HWADDR ]; then
+		return 1
+	fi
+	
+	macstr=${HWADDR,,}
+	
+	IFS=':' read -a mac_array <<< "$macstr"
+	#用MAC地址转换为设备序列号查找对应的PCI设备
+	#Intel序列号格式为mac[0]-mac[1]-mac[2]-ff-ff-mac[3]-mac[4]-mac[5]
+	#Broadcom序列号格式为mac[0]-mac[1]-mac[2]-ff-fe-mac[3]-mac[4]-mac[5]
+	#但是Intel对于同一网卡上的多个网口的序列号均相同，为第一个网口的MAC地址转换而成，所以判断时不判断mac[5]是否匹配
+	#XXX:有可能会出现同一个网卡上多个网口mac[4]不同的情况
+	lastline=$(lspci -v |awk 'BEGIN{FS="\n";RS="" } /Device Serial Number '"${mac[0]}"'-'"${mac[1]}"'-'"${mac[2]}"'-..-..-'"${mac[3]}"'-'"${mac[4]}"'-../{print $NF;exit}')
+	driver=$(awk '/^Kernel modules: [A-Za-z0-9]*$/{print $NF}' <<< $lastline)
+	if [ -z $driver ]; then
+		return 1
+	fi
+	return 0
+}
+
+
+#查找接口对应模块
+function getDrvName
+{
+	#去重
+	INTERFACES=($(awk -vRS=' ' '!a[$1]++' <<< ${INTERFACES[@]}))
+
+	for intf in  ${INTERFACES[@]}
+	do
+		#driver=$(awk -v a=$intf '$1=="alias"&&$2==a{print $3}' /etc/modprobe.conf)
+		#优先尝试使用ethtool获取接口使用的驱动名称（在驱动已经加载，接口可用时）
+		#获取失败时在udev生成的rules文件中查找驱动名称
+		#仍未找到则尝试使用接口的mac在pci信息中查找
+		driver=$(ethtool -i $intf 2>/dev/null |awk '$1=="driver:"{print $2}')
+		if [ $? != 0 ] || [ -z "$driver" ]; then
+			getDrvFromNetrules "$intf"
+			if [ $? != 0 ] || [ -z "$driver" ]; then
+				getDrvFromPciInfo "$intf"
+				if [ $? != 0 ] || [ -z "$driver" ]; then
+					echo "Error: Retrieve driver name for $intf failed, abort."
+					exit 1
+				fi
+			fi
+		fi
+		driver_array=("${driver_array[@]}" $driver)
+	done
+	
+	#去重
+	driver_array=($(awk -vRS=' ' '!a[$1]++' <<< ${driver_array[@]}))
+}
+
+
+function getDrvDir
+{
+	#找到模块对应的驱动代码目录
+	for drv in ${driver_array[@]}
+	do
+		for map in ${DRIVER_MAP_ARRAY[@]}
+		do
+			dir=$(awk -F":" '$1=="'$drv'"{print $2}' <<< $map)
+			if [ -n "$dir" ]; then
+				driver_dir_array=("${driver_dir_array[@]}" $dir)
+				inuse_driver_map_array=("${inuse_driver_map_array[@]}" $map)
+				break
+			fi
+		done
+		if  [ -z "$dir" ]; then
+			echo "Source code of $drv not found."
+			#exit 1
+		fi
+	done
+
+	#去重
+	driver_dir_array=($(awk -vRS=' ' '!a[$1]++' <<< ${driver_dir_array[@]}))
+	inuse_driver_map_array=($(awk -vRS=' ' '!a[$1]++' <<< ${inuse_driver_map_array[@]}))
+}
+#通过驱动模块反推受到影响的接口
+
+function getRelevantIntf
+{
+	relevant_intf_array=($(ifconfig |awk '$2=="Link" && $3=="encap:Ethernet"{print $1}'))
+
+	for i in ${!relevant_intf_array[@]}
+	do
+		intf=${relevant_intf_array[$i]}
+		driver=$(ethtool -i $intf |awk '$1=="driver:"{print $2}')
+		flag=0;
+		for compdriver in  ${driver_array[@]}
+		do
+			if [ "$driver" == "$compdriver" ]; then 
+				flag=1
+				break
+			fi
+		done
+		if [ $flag == 0 ]; then
+			for compdriver in ${relevant_driver_array[@]}
+			do
+				if [ "$driver" == "$compdriver" ]; then 
+					flag=1
+					break
+				fi
+			done
+		fi
+		if [ $flag == 0 ]; then
+			unset relevant_intf_array[$i]
+		fi
+	done
+}
+
+function initConf
+{
+	source dpa.conf
+	getDrvName
+	getDrvDir
+	getRelevantIntf
+}

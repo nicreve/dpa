@@ -1,0 +1,30 @@
+#!/bin/bash
+# Shell script for DPA
+# Author: <nicrevelee@gmail.com>
+# Last Update: 2014-04-24
+
+source confparse
+
+function expandRanges
+{
+  local IFS=,
+  set -- $1
+  for range; do
+    case $range in
+      *-*) for (( i=${range%-*}; i<=${range#*-}; i++ )); do echo $i; done ;;
+      *)   echo $range ;;
+    esac
+  done
+}
+function getAffinityCPUs
+{
+	cpunum=`cat /proc/cpuinfo | grep processor | wc -l`
+
+	affinity_cpus_array=( $(expandRanges $AFFINITY_RANGE) )
+	affinity_cpus_array=($(for each in ${affinity_cpus_array[@]}; do echo $each; done | sort -n -u))
+
+	if [ ${affinity_cpus_array[@]: -1} -ge $cpunum ] ; then
+		echo "Error: Invalid affinity range $AFFINITY_RANGE, only has $cpunum CPUs."
+		exit 1
+	fi
+}
